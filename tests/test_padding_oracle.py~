@@ -1,0 +1,20 @@
+from unittest import TestCase
+import unittest
+
+import padding_oracle
+
+test_string = "f20bdba6ff29eed7"
+"b046d1df9fb70000"  
+"58b1ffb4210a580f"  
+"748b4ac714c001bd"  
+"4a61044426fb515d"  
+"ad3f21f18aa577c0"  
+"bdf302936266926f" 
+"f37dbf7035d5eeb4"
+
+class TestPaddingOracle(TestCase):
+	def split_cbc_to_blocks(self):
+		print test_string
+
+if __name__=="__main__":
+	unittest.main()
