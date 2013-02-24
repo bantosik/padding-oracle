@@ -21,19 +21,19 @@ class Memento:
     pass
 
 class Persistence:
-    def __init__(self, filename):
+    def __init__(self, filename, clear):
+        if clear and os.isfile(filename):
+            os.remove(filename)
         self.filename = filename
-    def save(self, memento):
-        d = shelve.open(self.filename)
-        d["memento"] = memento
-        d.close()
-    def load(self):
-        d = shelve.open(self.filename)
-        memento = d['memento']
-        d.close()
-        return memento
-    
 
+    def save(self, memento):
+        with open(self.filename, "wbc") as f:
+            f.truncate()
+            pickle.dump(memento, f)
+
+    def load(self):
+        with open(self.filename, "wbc") as f:
+            memento = pickle.load(f)
 
 #--------------------------------------------------------------
 # padding oracle
@@ -74,25 +74,33 @@ def split_cbc_to_blocks( raw_cbc_ciphertext ):
 
 
 class StatefulAECruncher:
-    def __init__(self, cbc_ciphertext_in_hex, persitence):
-        logger.debug("Init from scratch")
+    def __init__(self, persistence, cbc_ciphertext_in_hex):
+        logger.debug("Init from scratch, setting persistence layer")
+        self.persistence = persistence
+        
+        if cbc_ciphertext_in_hex:
+            self.feed(cbc_ciphertext_in_hex)
+        else:
+            restart()
+        
+    def feed(self, cbc_ciphertext_in_hex):
         self.cbc = cbc_ciphertext_in_hex
         self.block = 1
         self.block_iterator = None
         self.intermediate_results = []
         self.restart = False
 
-    def load(self):
+
+    def restart(self):
         logger.debug("Init from persistence layer")
-        memento=self.persitence.load()
+        memento=self.persistence.load()
         self.cbc = memento.cbc
         self.block = memento.block
         
         if memento.iterator_memento is None:
             self.block_iterator = None
         else:
-            self.block_iterator = BlockIterator(self)
-            self.block_iterator.load(iterator_memento)
+            self.block_iterator = BlockIterator.create_from_memento(self, iterator_memento)
         self.intermediate_results = memento.results
         self.restart = True
 
@@ -109,15 +117,14 @@ class StatefulAECruncher:
 
     def save(self):
         memento = self.get_memento()
-        self.persitence.save(memento)
+        self.persistence.save(memento)
 
     def process(self, po):
         blocks = split_cbc_to_blocks( self.cbc.decode("hex") )
         
         while self.block < len(blocks):
             if not self.restart:
-                self.block_iterator = BlockIterator(self)
-                self.block_iterator.make(blocks[self.block -1 ], blocks[self.block])
+                self.block_iterator = BlockIterator.create_from_blocks(self, blocks[self.block -1 ], blocks[self.block])
             else:
                 self.restart = False
         
@@ -130,13 +137,24 @@ class StatefulAECruncher:
 
 
 class BlockIterator:
+    @staticmethod
+    def create_from_blocks(parent, block_preceding, block_to_decipher):
+        obj = BlockIterator(parent)
+        obj.make(block_preceding, block_to_decipher)
+        return obj
+
+    def create_from_memento(parent, memento):
+        obj = BlockIterator(parent)
+        obj.load(memento)
+        return obj
+
     def __init__(self, parent):
         self.parent = parent
 
     def make(self, block_preceding, block_to_decipher):
         self.block_preceding = block_preceding
         self.block_to_decipher = block_to_decipher
-        self.current_byte_offset_from_end = 1
+        self.current_byte_offset_from_end = 0
         self.current_byte_value = 0
         self.found_so_far = RAW_ZERO_BLOCK
         self.restart = False
@@ -160,7 +178,7 @@ class BlockIterator:
 
     def process(self, po):
         while self.current_byte_offset_from_end < BLOCK_SIZE_IN_BYTES:
-            logger.debug("Processing {} block, byte  {}".format(self.block_to_decipher, 
+            logger.debug("Processing {} block, byte  {}".format(self.block_to_decipher.encode("hex"), 
                 BLOCK_SIZE_IN_BYTES - self.current_byte_offset_from_end))
             if not self.restart:
                 self.current_byte_value = 0
@@ -170,14 +188,15 @@ class BlockIterator:
             while self.current_byte_value < 256:
                 logger.debug("Trying byte value: {}".format(self.current_byte_value))
                 raw_xoring_pattern = create_xoring_pattern(BLOCK_SIZE_IN_BYTES, 
-                    self.current_byte_offset_from_end, 
+                    self.current_byte_offset_from_end + 1, 
                     self.current_byte_value, 
                     self.found_so_far)
                 logger.debug("Xoring pattern %s" % raw_xoring_pattern.encode("hex"))
                 request = create_request(self.block_preceding, self.block_to_decipher, raw_xoring_pattern)
                 logger.debug("Request: %s" % request )
                 if po.query(request):
-                    self.found_so_far = update_string(BLOCK_SIZE_IN_BYTES - i,j,found_so_far)
+                    self.found_so_far = update_string(BLOCK_SIZE_IN_BYTES - self.current_byte_offset_from_end,
+                        self.current_byte_value, self.found_so_far)
                     logger.debug("Found last byte of a block! %s" % self.found_so_far.encode("hex"))
                     self.current_byte_value = 0
                     self.parent.save()
@@ -194,11 +213,12 @@ class BlockIterator:
 if __name__ == "__main__":
     import time
     config("padding", logging.DEBUG)
+    persistence = Persistence(FILENAME, False)
     if os.path.isfile(FILENAME):
         logging.debug("Found filename %s" % FILENAME)
-        persistence = Persistence(FILENAME)
-        cruncher = StatefulAECruncher(persistence)
+        cruncher = StatefulAECruncher(persistence, None)
+        cruncher.restart()
     else:
-        cruncher = StatefulAECruncher("f20bdba6ff29eed7b046d1df9fb7000058b1ffb4210a580f748b4ac714c001bd4a61044426fb515dad3f21f18aa577c0bdf302936266926ff37dbf7035d5eeb4", persistence)
+        cruncher = StatefulAECruncher(persistence, "f20bdba6ff29eed7b046d1df9fb7000058b1ffb4210a580f748b4ac714c001bd4a61044426fb515dad3f21f18aa577c0bdf302936266926ff37dbf7035d5eeb4")
     po = PaddingOracle()
     print cruncher.process(po)
