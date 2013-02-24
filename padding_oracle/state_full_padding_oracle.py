@@ -2,7 +2,7 @@ import urllib2
 import sys
 import os
 import logging
-import shelve
+import pickle
 
 from crypto_primitives import strxor
 
@@ -22,17 +22,17 @@ class Memento:
 
 class Persistence:
     def __init__(self, filename, clear):
-        if clear and os.isfile(filename):
+        if clear and os.path.isfile(filename):
             os.remove(filename)
         self.filename = filename
 
     def save(self, memento):
-        with open(self.filename, "wbc") as f:
+        with open(self.filename, "w+") as f:
             f.truncate()
             pickle.dump(memento, f)
 
     def load(self):
-        with open(self.filename, "wbc") as f:
+        with open(self.filename, "w+") as f:
             memento = pickle.load(f)
 
 #--------------------------------------------------------------
@@ -51,6 +51,7 @@ class PaddingOracle(object):
             return False # bad padding
 
 def create_xoring_pattern(block_size, byte_value_and_count, guess, a_string):
+    logger.debug("Create_xoring_pattern called with a_string: %s" % a_string.encode("hex"))
     padding_numerical = [0] * (block_size - byte_value_and_count)
     padding_numerical = padding_numerical + [byte_value_and_count^guess]
     padding_numerical = padding_numerical + [byte_value_and_count] * (byte_value_and_count - 1)
@@ -81,7 +82,7 @@ class StatefulAECruncher:
         if cbc_ciphertext_in_hex:
             self.feed(cbc_ciphertext_in_hex)
         else:
-            restart()
+            self.restart()
         
     def feed(self, cbc_ciphertext_in_hex):
         self.cbc = cbc_ciphertext_in_hex
@@ -135,6 +136,22 @@ class StatefulAECruncher:
             self.save()
         return "".join(self.intermediate_results)
 
+    def process2(self, po):
+        blocks = split_cbc_to_blocks( self.cbc.decode("hex") )
+        
+        self.block = 3
+        if not self.restart:
+            self.block_iterator = BlockIterator.create_from_blocks(self, blocks[self.block -1 ], blocks[self.block])
+        else:
+            self.restart = False
+    
+        decoded_block = self.block_iterator.process(po)
+        self.block = self.block + 1
+        self.intermediate_results.append(decoded_block)
+        self.block_iterator = None
+        self.save()
+        return "".join(self.intermediate_results)
+
 
 class BlockIterator:
     @staticmethod
@@ -143,6 +160,7 @@ class BlockIterator:
         obj.make(block_preceding, block_to_decipher)
         return obj
 
+    @staticmethod
     def create_from_memento(parent, memento):
         obj = BlockIterator(parent)
         obj.load(memento)
@@ -195,7 +213,7 @@ class BlockIterator:
                 request = create_request(self.block_preceding, self.block_to_decipher, raw_xoring_pattern)
                 logger.debug("Request: %s" % request )
                 if po.query(request):
-                    self.found_so_far = update_string(BLOCK_SIZE_IN_BYTES - self.current_byte_offset_from_end,
+                    self.found_so_far = update_string(BLOCK_SIZE_IN_BYTES - self.current_byte_offset_from_end - 1,
                         self.current_byte_value, self.found_so_far)
                     logger.debug("Found last byte of a block! %s" % self.found_so_far.encode("hex"))
                     self.current_byte_value = 0
@@ -207,18 +225,31 @@ class BlockIterator:
             else:
                 raise ValueError("no byte found for position")
             self.current_byte_offset_from_end = self.current_byte_offset_from_end + 1
+        return self.found_so_far
 
-
-
-if __name__ == "__main__":
-    import time
+def main():
+    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--clear", help="force clearing memento file")
+    args = parser.parse_args()
+    if args.clear:
+        clear = True
+    else:
+        clear = False
+    
     config("padding", logging.DEBUG)
-    persistence = Persistence(FILENAME, False)
+    persistence = Persistence(FILENAME, clear)
     if os.path.isfile(FILENAME):
         logging.debug("Found filename %s" % FILENAME)
         cruncher = StatefulAECruncher(persistence, None)
         cruncher.restart()
     else:
         cruncher = StatefulAECruncher(persistence, "f20bdba6ff29eed7b046d1df9fb7000058b1ffb4210a580f748b4ac714c001bd4a61044426fb515dad3f21f18aa577c0bdf302936266926ff37dbf7035d5eeb4")
+    
     po = PaddingOracle()
-    print cruncher.process(po)
+    print cruncher.process2(po)
+
+if __name__ == "__main__":
+    main()
+    
